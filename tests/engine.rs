@@ -66,6 +66,28 @@ fn greedy_bots_finish_hands() {
     play_many(200, |_| [Box::new(GreedyBot), Box::new(GreedyBot), Box::new(GreedyBot), Box::new(GreedyBot)]);
 }
 
+#[test]
+fn strong_bots_finish_hands() {
+    use istaka::strong::StrongBot;
+    play_many(200, |_| {
+        [Box::new(StrongBot::default()), Box::new(GreedyBot), Box::new(StrongBot::default()), Box::new(RandomBot::new(5))]
+    });
+}
+
+/// Duplicate karşılaştırma tekrarlanabilir: aynı tohumlar, iş parçacığı sayısından
+/// bağımsız olarak aynı sonucu verir; aynı bot kendisine karşı tam 0 farkla biter.
+#[test]
+fn duel_is_reproducible() {
+    use istaka::duel::{run, summarize};
+    let rules = Rules::default();
+    let a = run("strong", "greedy", 500, 60, 1, &rules);
+    let b = run("strong", "greedy", 500, 60, 7, &rules);
+    assert_eq!(a, b);
+    let same = summarize(&run("greedy", "greedy", 0, 40, 3, &rules));
+    assert_eq!(same.mean, 0.0);
+    assert_eq!(same.a_wins, same.b_wins);
+}
+
 /// Hep desteden çeker ve elindeki ilk taşı atar; bitmeyi asla denemez.
 struct Passive;
 impl Agent for Passive {

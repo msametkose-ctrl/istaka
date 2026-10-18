@@ -195,7 +195,7 @@ fn solver_matches_brute_force() {
 
 /// Tablo değerlendiricisi: uzaklık 0 ⇔ bitmiş el (kaba kuvvet ve `is_normal`/`is_pairs`),
 /// 15 taşta uzaklık 0 ⇔ bir atışla bitiş, normal uzaklık <= 1 ⇔ tek taş değişimiyle bitiş;
-/// `discard_distances` her atış için `distance` ile aynı.
+/// `discard_distances` her atış için `distance` ile aynı. Perde başına 1 okey ayarında da.
 #[test]
 fn evaluator_matches_solver() {
     use istaka::eval::distance;
@@ -216,8 +216,9 @@ fn evaluator_matches_solver() {
     let mut rng = Rng::new(77);
     let mut finished = 0;
     let mut near = 0;
-    for wrap in [true, false] {
-        let rules = Rules { wrap_13_1: wrap, ..Rules::default() };
+    // Kaba kuvvet denetleyici perde başına 2 okey içindir; 1 okey ayarında `is_normal`.
+    for (wrap, okeys) in [(true, 2), (false, 2), (true, 1)] {
+        let rules = Rules { wrap_13_1: wrap, max_okeys_per_meld: okeys, ..Rules::default() };
         let mut n = 0;
         while n < 12_000 {
             let okey = okey_of(rng.below(52) as Kind);
@@ -236,8 +237,8 @@ fn evaluator_matches_solver() {
             let p = pack(&hand, okey);
             let d = distance(&p, &rules);
             let names = istaka::tile::names(&hand);
-            let normal = brute(&hand, okey, wrap);
-            assert_eq!(d.normal == 0, normal, "normal (wrap={wrap}) okey {} el {names}", istaka::tile::name(okey));
+            let normal = if okeys == 2 { brute(&hand, okey, wrap) } else { is_normal(&mut p.clone(), &rules) };
+            assert_eq!(d.normal == 0, normal, "normal (wrap={wrap}, okey/per={okeys}) okey {} el {names}", istaka::tile::name(okey));
             assert_eq!(d.pairs == 0, is_pairs(&p), "çift: el {names}");
             finished += (d.min() == 0) as u32;
 
@@ -273,7 +274,7 @@ fn evaluator_matches_solver() {
             n += 1;
         }
     }
-    assert!(finished > 3_000 && near > 1_000, "yeterince bitmiş/yakın el yok: {finished} {near}");
+    assert!(finished > 4_500 && near > 1_500, "yeterince bitmiş/yakın el yok: {finished} {near}");
 }
 
 /// Hızlı ukeire (seri iyileştiricileri, 15'lik süzgeci, örnek örtü) her taşı tek tek
@@ -311,8 +312,8 @@ fn ukeire_matches_definition() {
 
     let mut rng = Rng::new(9);
     let mut nonzero = 0;
-    for wrap in [true, false] {
-        let rules = Rules { wrap_13_1: wrap, ..Rules::default() };
+    for (wrap, okeys) in [(true, 2), (false, 2), (true, 1)] {
+        let rules = Rules { wrap_13_1: wrap, max_okeys_per_meld: okeys, ..Rules::default() };
         let mut n = 0;
         while n < 3_000 {
             let okey = okey_of(rng.below(52) as Kind);

@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 const USAGE: &str = "kullanım:
   istaka bench [random|greedy] [saniye=10] [iş_parçacığı=tümü]
-  istaka ornek [tohum=1]          bir eli greedy botlarla oynatıp yazar";
+  istaka ornek [tohum=1]          bir eli greedy botlarla oynatıp yazar
+  istaka duel A B [tohum=20000] [iş_parçacığı=tümü] [ilk_tohum=0]
+                                  duplicate karşılaştırma (botlar: random, greedy, strong)";
 
 #[derive(Default, Clone, Copy)]
 struct Stats {
@@ -134,11 +136,42 @@ fn ornek(args: &[String]) {
     println!("{:?}, {} atış, puan {:?}", res.outcome, res.turns, res.scores);
 }
 
+fn duel(args: &[String]) {
+    let (a, b) = match (args.first(), args.get(1)) {
+        (Some(a), Some(b)) if [a, b].iter().all(|x| istaka::duel::BOTS.contains(&x.as_str())) => (a.as_str(), b.as_str()),
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    };
+    let n: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20_000);
+    let threads: usize = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let first: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let start = Instant::now();
+    let rs = istaka::duel::run(a, b, first, n, threads, &Rules::default());
+    let s = istaka::duel::summarize(&rs);
+    let pct = |x: u64| 100.0 * x as f64 / s.hands as f64;
+    let wil = |k: u64| {
+        let (lo, hi) = istaka::duel::wilson(k, s.hands);
+        format!("%{:.1} [%{:.1}, %{:.1}]", pct(k), 100.0 * lo, 100.0 * hi)
+    };
+    println!("{a} - {b}: {} tohum ({first}..), {} el (her tohum [A,B,A,B] ve [B,A,B,A]), {:.1} sn", s.seeds, s.hands, start.elapsed().as_secs_f64());
+    println!(
+        "el başına puan farkı ({a} - {b}, oyuncu başına): {:+.4}  %95 GA [{:+.4}, {:+.4}]",
+        s.mean, s.ci.0, s.ci.1
+    );
+    println!("el kazanma: {a} {}, {b} {}, puansız {}", wil(s.a_wins), wil(s.b_wins), wil(s.draws));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("bench") => bench(&args[1..]),
         Some("ornek") => ornek(&args[1..]),
+        Some("duel") => duel(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);

@@ -18,6 +18,8 @@
 //! (her sayıdan 0/1/2 kopya), yalnızca serilerle `S` yuvada örtülebilen azami taş
 //! sayısını tutar. Gruplar, sayı sayı denenip renk tablolarına (max, +) katlamasıyla
 //! birleştirilir. Perde en çok 2 okey kuralı J <= 2 olduğundan kendiliğinden sağlanır.
+//! Perde en çok 1 okey ayarında iki okeyli elde bitiş `is_normal` ile kesin denetlenir;
+//! iki okeyli elde uzaklık > 0 yaklaşıktır (okeylerin aynı pere düşmesi izlenmez).
 //! Tablolar (12-13-1 açık/kapalı) ilk kullanımda bir kez kurulur (~0,2 sn, 48 MB).
 //!
 //! **Ukeire**: bir taş örtüyü en çok 1 artırır. Seriye girerek artıranlar, en iyi
@@ -547,8 +549,33 @@ fn pairs_distance(pair: u8, single: u8, j: u8) -> u8 {
 }
 
 fn check(p: &Packed, rules: &Rules) {
-    assert!(rules.max_okeys_per_meld >= 2, "değerlendirici perde başına en az 2 okey varsayar");
+    assert!(rules.max_okeys_per_meld >= 1, "değerlendirici perde başına en az 1 okey varsayar");
     debug_assert!(p.counts.iter().all(|&c| c <= 2) && p.jokers <= 2);
+}
+
+/// Perde en çok 1 okey kuralında iki okey ayrı perlere girmelidir; örtü modeli bunu
+/// izlemez. Bu durumda (iki okey) sonuç yaklaşık sayılır ve gerekirse kesin denetime
+/// geçilir.
+fn split_jokers(p: &Packed, rules: &Rules) -> bool {
+    rules.max_okeys_per_meld < 2 && p.jokers >= 2
+}
+
+/// 14 ya da 15 taşlık el (15'te bir atıştan sonra) normal bitmiş mi? Kesin, yavaş.
+fn finished_exact(p: &Packed, rules: &Rules) -> bool {
+    let total: u8 = p.counts.iter().sum::<u8>() + p.jokers;
+    if total == SLOTS as u8 {
+        return crate::solver::is_normal(&mut p.clone(), rules);
+    }
+    let natural = (0..FACES).filter(|&f| p.counts[f] > 0).any(|f| {
+        let mut q = *p;
+        q.counts[f] -= 1;
+        crate::solver::is_normal(&mut q, rules)
+    });
+    natural || p.jokers > 0 && {
+        let mut q = *p;
+        q.jokers -= 1;
+        crate::solver::is_normal(&mut q, rules)
+    }
 }
 
 /// 14 ya da 15 taşlık elin bitişe uzaklığı (15'te en iyi atıştan sonra).
@@ -560,7 +587,13 @@ pub fn distance(p: &Packed, rules: &Rules) -> Distance {
     let b = Prepared::new(&p.counts).covered(rules.wrap_13_1, SLOTS as u8, 0, cap);
     let pair = p.counts.iter().filter(|&&c| c == 2).count() as u8;
     let single = p.counts.iter().filter(|&&c| c == 1).count() as u8;
-    Distance { normal: SLOTS as u8 - j - b, pairs: pairs_distance(pair, single, j) }
+    let mut normal = SLOTS as u8 - j - b;
+    // İki okey aynı pere düşüyorsa biri atılmalıdır: bitmiş görünen el 1 uzakta.
+    // Uzaklık > 0'da bu ayrım yapılmaz (yaklaşık).
+    if normal == 0 && split_jokers(p, rules) && !finished_exact(p, rules) {
+        normal = 1;
+    }
+    Distance { normal, pairs: pairs_distance(pair, single, j) }
 }
 
 /// 15 taşlık elden her tür atılınca kalan 14'lüğün uzaklığı (elde olmayan tür `None`).
@@ -568,6 +601,18 @@ pub fn distance(p: &Packed, rules: &Rules) -> Distance {
 /// taş atılınca örtü değişmez, diğerleri için örtünün korunup korunmadığı aranır.
 pub fn discard_distances(full: &Packed, rules: &Rules) -> [Option<Distance>; PACKED_KINDS] {
     check(full, rules);
+    if split_jokers(full, rules) {
+        return std::array::from_fn(|x| {
+            let mut q = *full;
+            let present = if x == FACES { q.jokers > 0 } else { q.counts[x] > 0 };
+            if x == FACES && present {
+                q.jokers -= 1;
+            } else if present {
+                q.counts[x] -= 1;
+            }
+            present.then(|| distance(&q, rules))
+        });
+    }
     let wrap = rules.wrap_13_1;
     let base = Prepared::new(&full.counts);
     let naturals: u8 = full.counts.iter().sum();
@@ -688,6 +733,10 @@ pub fn ukeire_within(
     if now == 0 {
         return 0;
     }
+    // İki okeyli elde (perde 1 okey ayarı) kısayollar geçersiz: tanımla say.
+    if split_jokers(p, rules) {
+        return ukeire_direct(p, rules, unseen, now);
+    }
     let j = p.jokers;
     let naturals: u8 = p.counts.iter().sum();
     let pair = p.counts.iter().filter(|&&c| c == 2).count() as u8;
@@ -696,7 +745,14 @@ pub fn ukeire_within(
     let mut total = 0;
     // Gerçek okey: doğal taşlar aynı kalır, joker bir artar; normal uzaklık 1 düşer.
     if unseen[FACES] > 0 && j < 2 {
-        if d.normal == now || pairs_distance(pair, single, j + 1) < now {
+        let better = if rules.max_okeys_per_meld < 2 && j == 1 {
+            let mut q = *p;
+            q.jokers += 1;
+            distance(&q, rules).min() < now
+        } else {
+            d.normal == now || pairs_distance(pair, single, j + 1) < now
+        };
+        if better {
             total += unseen[FACES] as u32;
         }
     }
@@ -730,4 +786,27 @@ pub fn ukeire_within(
         }
     }
     total
+}
+
+/// Ukeire'nin doğrudan tanımı: her taşı ekleyip uzaklığa bakar.
+fn ukeire_direct(p: &Packed, rules: &Rules, unseen: &[u8; PACKED_KINDS], now: u8) -> u32 {
+    (0..PACKED_KINDS)
+        .filter(|&f| unseen[f] > 0)
+        .filter(|&f| {
+            let mut q = *p;
+            if f == FACES {
+                if q.jokers >= 2 {
+                    return false;
+                }
+                q.jokers += 1;
+            } else {
+                if q.counts[f] >= 2 {
+                    return false;
+                }
+                q.counts[f] += 1;
+            }
+            distance(&q, rules).min() < now
+        })
+        .map(|f| unseen[f] as u32)
+        .sum()
 }

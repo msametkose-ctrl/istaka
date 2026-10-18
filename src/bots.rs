@@ -1,4 +1,4 @@
-//! Taban botlar: rastgele ve açgözlü.
+//! Taban botlar: rastgele ve açgözlü. Güçlü bot `strong` modülünde.
 
 use crate::game::{Action, Agent, View};
 use crate::rng::Rng;
@@ -6,7 +6,7 @@ use crate::eval::{discard_distances, distance, ukeire_within, Distance, Superset
 use crate::solver::{best_win15, pack, Packed};
 use crate::tile::{Kind, FALSE_OKEY};
 
-fn forbidden(v: &View) -> Option<Kind> {
+pub(crate) fn forbidden(v: &View) -> Option<Kind> {
     if v.rules.rediscard_taken {
         None
     } else {
@@ -49,7 +49,7 @@ impl Agent for RandomBot {
 pub struct GreedyBot;
 
 /// Taşın Packed uzayındaki yeri: yüz 0..51, gerçek okey 52.
-fn slot(t: Kind, okey: Kind) -> usize {
+pub(crate) fn slot(t: Kind, okey: Kind) -> usize {
     if t == okey {
         PACKED_KINDS - 1
     } else if t == FALSE_OKEY {
@@ -59,7 +59,7 @@ fn slot(t: Kind, okey: Kind) -> usize {
     }
 }
 
-fn remove(p: &mut Packed, t: Kind, okey: Kind) {
+pub(crate) fn remove(p: &mut Packed, t: Kind, okey: Kind) {
     match slot(t, okey) {
         s if s == PACKED_KINDS - 1 => p.jokers -= 1,
         s => p.counts[s] -= 1,
@@ -67,7 +67,7 @@ fn remove(p: &mut Packed, t: Kind, okey: Kind) {
 }
 
 /// Oyuncunun göremediği taşlar: kendi eli, ortadaki atıklar ve gösterge dışındakiler.
-fn unseen(v: &View) -> [u8; PACKED_KINDS] {
+pub(crate) fn unseen(v: &View) -> [u8; PACKED_KINDS] {
     let mut u = [2u8; PACKED_KINDS];
     let seen = v.hand.iter().chain(v.discards.iter().flatten()).chain(std::iter::once(&v.indicator));
     for &t in seen {
