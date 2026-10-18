@@ -192,3 +192,178 @@ fn solver_matches_brute_force() {
     }
     assert!(positives > 5_000, "yeterince bitmiş el üretilmedi: {positives}/{checked}");
 }
+
+/// Tablo değerlendiricisi: uzaklık 0 ⇔ bitmiş el (kaba kuvvet ve `is_normal`/`is_pairs`),
+/// 15 taşta uzaklık 0 ⇔ bir atışla bitiş, normal uzaklık <= 1 ⇔ tek taş değişimiyle bitiş;
+/// `discard_distances` her atış için `distance` ile aynı.
+#[test]
+fn evaluator_matches_solver() {
+    use istaka::eval::distance;
+    use istaka::solver::{is_pairs, Packed};
+
+    fn normal_after_swap(p: &Packed, rules: &Rules) -> bool {
+        // Bir doğal taşı at, herhangi bir yüzü (kopya sınırı olmadan) çek.
+        (0..52).filter(|&d| p.counts[d] > 0).any(|d| {
+            (0..52).any(|t| {
+                let mut q = *p;
+                q.counts[d] -= 1;
+                q.counts[t] += 1;
+                is_normal(&mut q, rules)
+            })
+        })
+    }
+
+    let mut rng = Rng::new(77);
+    let mut finished = 0;
+    let mut near = 0;
+    for wrap in [true, false] {
+        let rules = Rules { wrap_13_1: wrap, ..Rules::default() };
+        let mut n = 0;
+        while n < 12_000 {
+            let okey = okey_of(rng.below(52) as Kind);
+            // Yarısı perlerden kurulmuş, yarısı tamamen rastgele el.
+            let hand = if n % 2 == 0 {
+                match constructed(&mut rng, okey, wrap) {
+                    Some(h) => h,
+                    None => continue,
+                }
+            } else {
+                let mut all: Vec<Kind> = (0..53u8).flat_map(|k| [k, k]).collect();
+                rng.shuffle(&mut all);
+                all.truncate(14);
+                all
+            };
+            let p = pack(&hand, okey);
+            let d = distance(&p, &rules);
+            let names = istaka::tile::names(&hand);
+            let normal = brute(&hand, okey, wrap);
+            assert_eq!(d.normal == 0, normal, "normal (wrap={wrap}) okey {} el {names}", istaka::tile::name(okey));
+            assert_eq!(d.pairs == 0, is_pairs(&p), "çift: el {names}");
+            finished += (d.min() == 0) as u32;
+
+            // 15 taş: rastgele bir taş ekle.
+            let mut h15 = hand.clone();
+            h15.push(rng.below(53) as Kind);
+            if h15.iter().filter(|&&t| t == *h15.last().unwrap()).count() <= 2 {
+                let p15 = pack(&h15, okey);
+                let d15 = distance(&p15, &rules);
+                let win = istaka::solver::best_win15(&h15, okey, &rules, None).is_some();
+                assert_eq!(d15.min() == 0, win, "15 taş (wrap={wrap}) okey {} el {}", istaka::tile::name(okey), istaka::tile::names(&h15));
+                let all = istaka::eval::discard_distances(&p15, &rules);
+                for x in 0..53 {
+                    let mut q = p15;
+                    let present = if x == 52 { q.jokers > 0 } else { q.counts[x] > 0 };
+                    if present {
+                        if x == 52 {
+                            q.jokers -= 1;
+                        } else {
+                            q.counts[x] -= 1;
+                        }
+                    }
+                    assert_eq!(all[x], present.then(|| distance(&q, &rules)), "atış {x}: el {}", istaka::tile::names(&h15));
+                }
+            }
+
+            // Uzaklık <= 1 denetimi pahalı; bir kısmında yapılır.
+            if n % 6 == 0 {
+                let one = d.normal <= 1;
+                assert_eq!(one, d.normal == 0 || normal_after_swap(&p, &rules), "uzaklık 1 (wrap={wrap}) okey {} el {names}", istaka::tile::name(okey));
+                near += one as u32;
+            }
+            n += 1;
+        }
+    }
+    assert!(finished > 3_000 && near > 1_000, "yeterince bitmiş/yakın el yok: {finished} {near}");
+}
+
+/// Hızlı ukeire (seri iyileştiricileri, 15'lik süzgeci, örnek örtü) her taşı tek tek
+/// ekleyip uzaklığa bakan doğrudan tanımla aynı sonucu vermeli.
+#[test]
+fn ukeire_matches_definition() {
+    use istaka::eval::{distance, ukeire, ukeire_within, Superset, PACKED_KINDS};
+    use istaka::solver::Packed;
+
+    fn direct(p: &Packed, rules: &Rules, unseen: &[u8; PACKED_KINDS]) -> u32 {
+        let now = distance(p, rules).min();
+        if now == 0 {
+            return 0;
+        }
+        (0..PACKED_KINDS)
+            .filter(|&f| unseen[f] > 0)
+            .filter(|&f| {
+                let mut q = *p;
+                if f == 52 {
+                    if q.jokers >= 2 {
+                        return false;
+                    }
+                    q.jokers += 1;
+                } else {
+                    if q.counts[f] >= 2 {
+                        return false;
+                    }
+                    q.counts[f] += 1;
+                }
+                distance(&q, rules).min() < now
+            })
+            .map(|f| unseen[f] as u32)
+            .sum()
+    }
+
+    let mut rng = Rng::new(9);
+    let mut nonzero = 0;
+    for wrap in [true, false] {
+        let rules = Rules { wrap_13_1: wrap, ..Rules::default() };
+        let mut n = 0;
+        while n < 3_000 {
+            let okey = okey_of(rng.below(52) as Kind);
+            // 15 taş: perlerden kurulmuş 14'lük + bir taş ya da tamamen rastgele.
+            let mut h15 = if n % 2 == 0 {
+                match constructed(&mut rng, okey, wrap) {
+                    Some(h) => h,
+                    None => continue,
+                }
+            } else {
+                let mut all: Vec<Kind> = (0..53u8).flat_map(|k| [k, k]).collect();
+                rng.shuffle(&mut all);
+                all.truncate(14);
+                all
+            };
+            h15.push(rng.below(53) as Kind);
+            if h15.iter().filter(|&&t| t == h15[14]).count() > 2 {
+                continue;
+            }
+            let full = pack(&h15, okey);
+            let mut unseen = [0u8; PACKED_KINDS];
+            for u in unseen.iter_mut() {
+                *u = rng.below(3) as u8;
+            }
+            let mut sup = Superset::new(&full, &rules);
+            for x in 0..PACKED_KINDS {
+                let mut p = full;
+                if x == 52 {
+                    if p.jokers == 0 {
+                        continue;
+                    }
+                    p.jokers -= 1;
+                } else {
+                    if p.counts[x] == 0 {
+                        continue;
+                    }
+                    p.counts[x] -= 1;
+                }
+                let want = direct(&p, &rules, &unseen);
+                let d = distance(&p, &rules);
+                assert_eq!(ukeire(&p, &rules, &unseen, d), want, "ukeire (wrap={wrap}): el {}", istaka::tile::names(&h15));
+                assert_eq!(
+                    ukeire_within(&p, &rules, &unseen, d, Some((&mut sup, x))),
+                    want,
+                    "ukeire süzgeçli (wrap={wrap}): el {} atılan {x}",
+                    istaka::tile::names(&h15)
+                );
+                nonzero += (want > 0) as u32;
+            }
+            n += 1;
+        }
+    }
+    assert!(nonzero > 10_000, "çok az ilerleyebilen el: {nonzero}");
+}

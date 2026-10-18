@@ -2,8 +2,9 @@
 
 use crate::game::{Action, Agent, View};
 use crate::rng::Rng;
-use crate::solver::{best_win15, max_melded, pack, Packed};
-use crate::tile::Kind;
+use crate::eval::{discard_distances, distance, ukeire_within, Distance, Superset, PACKED_KINDS};
+use crate::solver::{best_win15, pack, Packed};
+use crate::tile::{Kind, FALSE_OKEY};
 
 fn forbidden(v: &View) -> Option<Kind> {
     if v.rules.rediscard_taken {
@@ -42,43 +43,69 @@ impl Agent for RandomBot {
     }
 }
 
-/// Elin perlere girebilen taş sayısını (ya da çift yolunu) en büyük tutan atışı seçer.
-/// Yerden taşı, ancak bu sayıyı artırıyorsa alır. Rakipleri hiç dikkate almaz.
+/// Bitişe uzaklığı en küçük tutan atışı seçer; eşitlikte eli ilerleten görünmeyen taş
+/// sayısı (ukeire) en büyük olanı. Yerden taşı ancak uzaklığı azaltıyorsa alır.
+/// Rakiplerin elini hiç dikkate almaz; yalnızca görünen taşları sayar.
 pub struct GreedyBot;
 
-fn score(p: &Packed, rules: &crate::rules::Rules) -> u8 {
-    let pairs = p.counts.iter().filter(|&&c| c == 2).count() as u8;
-    let singles = p.counts.iter().filter(|&&c| c == 1).count() as u8;
-    let pair_route = 2 * (pairs + p.jokers.min(singles));
-    max_melded(p, rules).max(pair_route)
+/// Taşın Packed uzayındaki yeri: yüz 0..51, gerçek okey 52.
+fn slot(t: Kind, okey: Kind) -> usize {
+    if t == okey {
+        PACKED_KINDS - 1
+    } else if t == FALSE_OKEY {
+        okey as usize
+    } else {
+        t as usize
+    }
 }
 
-/// 15 taştan en iyi atış ve ardından kalan elin puanı.
-fn best_discard(hand: &[Kind], okey: Kind, rules: &crate::rules::Rules, forbid: Option<Kind>) -> (Kind, u8) {
-    let full = pack(hand, okey);
-    let mut best = (hand[0], 0u8);
-    let mut first = true;
-    for (idx, &t) in hand.iter().enumerate() {
-        if Some(t) == forbid || hand[..idx].contains(&t) {
+fn remove(p: &mut Packed, t: Kind, okey: Kind) {
+    match slot(t, okey) {
+        s if s == PACKED_KINDS - 1 => p.jokers -= 1,
+        s => p.counts[s] -= 1,
+    }
+}
+
+/// Oyuncunun göremediği taşlar: kendi eli, ortadaki atıklar ve gösterge dışındakiler.
+fn unseen(v: &View) -> [u8; PACKED_KINDS] {
+    let mut u = [2u8; PACKED_KINDS];
+    let seen = v.hand.iter().chain(v.discards.iter().flatten()).chain(std::iter::once(&v.indicator));
+    for &t in seen {
+        let s = slot(t, v.okey);
+        u[s] = u[s].saturating_sub(1);
+    }
+    u
+}
+
+/// 15 taştan en iyi atış: en küçük uzaklık, sonra en büyük ukeire, sonra okey olmayan.
+fn best_discard(v: &View, forbid: Option<Kind>, full: &Packed, dist: &[Option<Distance>; PACKED_KINDS]) -> Kind {
+    let mut cands: Vec<(Kind, Packed, Distance)> = Vec::with_capacity(15);
+    for (idx, &t) in v.hand.iter().enumerate() {
+        if Some(t) == forbid || v.hand[..idx].contains(&t) {
             continue;
         }
-        let mut p = full;
-        let single = [t];
-        let one = pack(&single, okey);
-        if one.jokers == 1 {
-            p.jokers -= 1;
-        } else {
-            let f = one.counts.iter().position(|&c| c > 0).unwrap();
-            p.counts[f] -= 1;
-        }
-        let s = score(&p, rules);
+        let mut p = *full;
+        remove(&mut p, t, v.okey);
+        cands.push((t, p, dist[slot(t, v.okey)].expect("eldeki taş")));
+    }
+    let low = cands.iter().map(|c| c.2.min()).min().expect("atılabilecek taş yok");
+    cands.retain(|c| c.2.min() == low);
+    if cands.len() == 1 {
+        return cands[0].0;
+    }
+    let u = unseen(v);
+    let mut sup = Superset::new(full, v.rules);
+    let mut best = (cands[0].0, 0u32);
+    let mut first = true;
+    for (t, p, d) in &cands {
+        let k = ukeire_within(p, v.rules, &u, *d, Some((&mut sup, slot(*t, v.okey))));
         // Eşitlikte okeyi atmamak için okey en sona kalır.
-        if first || s > best.1 || (s == best.1 && best.0 == okey) {
-            best = (t, s);
+        if first || k > best.1 || (k == best.1 && best.0 == v.okey) {
+            best = (*t, k);
             first = false;
         }
     }
-    best
+    best.0
 }
 
 impl Agent for GreedyBot {
@@ -89,19 +116,25 @@ impl Agent for GreedyBot {
         };
         let mut h = v.hand.to_vec();
         h.push(t);
-        let forbid = if v.rules.rediscard_taken { None } else { Some(t) };
-        if best_win15(&h, v.okey, v.rules, forbid).is_some() {
-            return true;
+        let after = distance(&pack(&h, v.okey), v.rules).min();
+        if after == 0 {
+            let forbid = if v.rules.rediscard_taken { None } else { Some(t) };
+            if best_win15(&h, v.okey, v.rules, forbid).is_some() {
+                return true;
+            }
         }
-        let now = score(&pack(v.hand, v.okey), v.rules);
-        let (d, after) = best_discard(&h, v.okey, v.rules, forbid);
-        d != t && after > now
+        // Uzaklık azalıyorsa en iyi atış alınan taş değildir.
+        after < distance(&pack(v.hand, v.okey), v.rules).min()
     }
 
     fn act(&mut self, v: &View) -> Action {
-        if let Some(w) = best_win15(v.hand, v.okey, v.rules, forbidden(v)) {
-            return Action::Win(w.discard);
+        let full = pack(v.hand, v.okey);
+        let dist = discard_distances(&full, v.rules);
+        if dist.iter().flatten().any(|d| d.min() == 0) {
+            if let Some(w) = best_win15(v.hand, v.okey, v.rules, forbidden(v)) {
+                return Action::Win(w.discard);
+            }
         }
-        Action::Discard(best_discard(v.hand, v.okey, v.rules, forbidden(v)).0)
+        Action::Discard(best_discard(v, forbidden(v), &full, &dist))
     }
 }

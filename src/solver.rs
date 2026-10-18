@@ -198,7 +198,8 @@ pub fn best_win15(tiles: &[Kind], okey: Kind, rules: &Rules, forbidden: Option<K
     best
 }
 
-/// Perlere girebilen azami taş sayısı; jokerler her zaman işe yarar sayılır. Bot sezgiseli.
+/// Perlere girebilen azami taş sayısı; jokerler her zaman işe yarar sayılır. Faz 0 açgözlü
+/// botunun sezgiseliydi; botlar artık `eval` kullanıyor.
 pub fn max_melded(p: &Packed, rules: &Rules) -> u8 {
     let mut q = *p;
     let remaining: u8 = q.counts.iter().sum();
